@@ -1,0 +1,10 @@
+# Built application files / Gradle
+/build/
+/app/build/
+/.gradle/
+.kotlin/
+
+# Local configuration (machine-specific SDK path)
+local.properties
+
+# Keep the Gradle wrapper tracked (gradle/wrapper/*, gradlew, gradlew.bat)
