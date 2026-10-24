@@ -60,15 +60,23 @@ final class OnboardingUITests: XCTestCase {
         app.launchArguments = ["--zedlink-demo"]
         app.launch()
         app.tabBars.buttons["Connections"].tap()
-        app.buttons["add-connection"].tap()
+        addConnection(app)
         let endpoint = app.textFields["gateway-endpoint"]
         XCTAssertTrue(endpoint.waitForExistence(timeout: 5))
         endpoint.tap(); endpoint.typeText("https://demo.invalid")
         app.buttons["Close"].tap()
         app.tabBars.buttons["Settings"].tap()
         app.tabBars.buttons["Connections"].tap()
-        app.buttons["add-connection"].tap()
+        addConnection(app)
         XCTAssertEqual(app.textFields["gateway-endpoint"].value as? String, "https://demo.invalid")
+    }
+
+    /// "Add connection" ends the Saved connections section; in demo mode a connection and its workspaces come first,
+    /// so the list has not made the button until it is scrolled to.
+    private func addConnection(_ app: XCUIApplication) {
+        let add = app.buttons["add-connection"]
+        for _ in 0..<6 where !(add.exists && add.isHittable) { app.swipeUp() }
+        add.tap()
     }
 
 }
