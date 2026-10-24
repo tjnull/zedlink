@@ -287,6 +287,10 @@ private struct SessionRow: View {
     }
 
     var body: some View {
+        withDialogs(screen)
+    }
+
+    private var screen: some View {
         VStack(spacing: 0) {
             SessionIssueBanner()
             if let snapshot = session.snapshot, snapshot.threadID == threadID {
@@ -461,6 +465,12 @@ private struct SessionRow: View {
             } catch { if scope == session.operationScope { session.reportIssue("Image unavailable: " + error.localizedDescription) } }
             self.composerPhoto = nil
         }
+    }
+
+    // the dialogs and alerts apart from the screen: one chain of all of them was too long for Xcode 26.5's type
+    // checker ("unable to type-check this expression in reasonable time", Views.swift:432 and :474 from 1f9cee8)
+    private func withDialogs(_ screen: some View) -> some View {
+        screen
         .confirmationDialog("Clear uncertain delivery?", isPresented: $showingClearConfirmation) {
             Button("Clear locally", role: .destructive) { session.clearPending() }
         } message: {
@@ -500,14 +510,18 @@ private struct SessionRow: View {
                 Task { if await session.unexposeSelectedThread() { dismiss() } }
             }
         } message: { Text("The Agent keeps running in desktop Zed. Remote access to this session stops.") }
-        .confirmationDialog("Rewind this conversation?", isPresented: Binding(
-            get: { rewindPoint != nil }, set: { if !$0 { rewindPoint = nil } }
-        )) {
+        .confirmationDialog("Rewind this conversation?", isPresented: rewindDialogShown) {
             Button("Rewind", role: .destructive) {
                 if let point = rewindPoint { Task { await session.rewind(to: point) } }
                 rewindPoint = nil
             }
         } message: { Text("Messages and Agent edits after this point may be removed.") }
+    }
+
+    // a named binding: inline in the modifier chain above, Xcode 26.5 gave up type-checking the body ("unable to
+    // type-check this expression in reasonable time", Views.swift:474)
+    private var rewindDialogShown: Binding<Bool> {
+        Binding(get: { rewindPoint != nil }, set: { if !$0 { rewindPoint = nil } })
     }
 
     private func savedConversationBanner(_ message: String) -> some View {
