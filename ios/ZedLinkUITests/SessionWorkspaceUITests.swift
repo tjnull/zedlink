@@ -26,6 +26,9 @@ final class SessionWorkspaceUITests: XCTestCase {
 
     func testSessionNavigationAndWorkspaceViews() throws {
         let app = try openDisposableSession()
+        app.buttons["open-changes"].tap()
+        XCTAssertTrue(app.buttons["workspace-changes"].waitForExistence(timeout: 5))
+        app.buttons["close-workspace"].tap()
         app.buttons["open-workspace"].tap()
         for page in ["files", "changes", "terminal", "debug", "activity"] {
             let tab = app.buttons["workspace-" + page]
@@ -38,6 +41,9 @@ final class SessionWorkspaceUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "composer").firstMatch.waitForExistence(timeout: 5))
         app.buttons["back-to-sessions"].tap()
         XCTAssertTrue(app.tabBars.buttons["Connections"].waitForExistence(timeout: 5))
+        let thread = ProcessInfo.processInfo.environment["ZEDLINK_E2E_THREAD_ID"]!
+        XCTAssertTrue(app.buttons["thread-" + thread].waitForExistence(timeout: 5),
+                      "Recently opened sessions must keep the same accessible entry point.")
     }
 
     func testComposerKeyboardDismissesOnWorkspaceNavigation() throws {

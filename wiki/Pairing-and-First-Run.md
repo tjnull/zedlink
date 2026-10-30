@@ -31,6 +31,9 @@ Open **Settings → ZedLink → Paired Devices** and choose one of these options
 
 - **Open Browser QR** shows the private pairing page on the workstation.
 - **Show Terminal QR** opens a local Zed terminal and prints a scan-ready QR, HTTPS address, gateway identity, manual code, and expiration.
+- **Review Devices** lists credentials that were already issued. It does not show a new pairing challenge. Do not revoke a device to troubleshoot a hostname or Tailscale DNS failure.
+
+The browser pairing page shows the current HTTPS address and gateway identity beside the QR. Compare that address with the phone's saved ZedLink connection. If Safari says “Server cannot be found” for the hostname but reaches a certificate warning for the workstation's Tailscale IP at the same port, the private route and TLS listener are reachable; stop at the warning and troubleshoot name resolution. The IP address is not a replacement saved endpoint because its certificate is issued for the hostname.
 
 The terminal path does not open a browser. From a shell, the equivalent primary-route command is:
 

@@ -172,7 +172,8 @@ import Network
         notificationNeedsWorkspace = false
     }
 
-    func connect(_ nextProfile: ConnectionProfile, target requestedTargetID: String? = nil) async {
+    func connect(_ nextProfile: ConnectionProfile, target requestedTargetID: String? = nil,
+                 routeRetryAttempt: Int = 0) async {
         let sameProfile = profile?.gatewayID.caseInsensitiveCompare(nextProfile.gatewayID) == .orderedSame
         let sameTarget = requestedTargetID == nil || requestedTargetID == targetID
         let previousThread = sameProfile && sameTarget ? selectedThreadID : nil
@@ -319,6 +320,7 @@ import Network
             }
             guard current == generation else { return }
             state = .live
+            pathRetryTask?.cancel(); pathRetryTask = nil
             resumeTrace?.mark("Live ready")
             resumeTrace?.finish(); resumeTrace = nil
             lastAuxiliaryRefresh = Date()
@@ -339,13 +341,27 @@ import Network
                 pathRetryTask = Task { [weak self] in
                     try? await Task.sleep(for: .milliseconds(500))
                     guard let self, !Task.isCancelled, current == self.generation else { return }
+                    self.pathRetryTask = nil
                     await self.refresh()
                 }
                 return
             }
-            state = .offline
+            let transientRouteFailure = (error as? GatewayFailure)?.isTransientRouteFailure == true
+            state = transientRouteFailure && foregroundActive ? .reconnecting : .offline
             issue = error.localizedDescription
             resumeTrace?.finish(); resumeTrace = nil
+            if transientRouteFailure && foregroundActive {
+                let delaySeconds = min(60, 5 << min(routeRetryAttempt, 4))
+                pathRetryTask?.cancel()
+                pathRetryTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(Int64(delaySeconds)))
+                    guard let self, !Task.isCancelled, self.foregroundActive,
+                          current == self.generation else { return }
+                    self.pathRetryTask = nil
+                    await self.connect(nextProfile, target: requestedTargetID,
+                                       routeRetryAttempt: min(routeRetryAttempt + 1, 4))
+                }
+            }
         }
     }
 
@@ -568,6 +584,7 @@ import Network
                 }
                 if self.state == .live { return }
             }
+            self.pathRetryTask = nil
             await self.refresh()
         }
     }
@@ -712,6 +729,7 @@ import Network
                 UserDefaults.standard.set(id, forKey: selectedThreadKey(profile, targetID: targetID))
             }
             attachments = []; contextPaths = []; supportsImages = nil; threadSettings = nil
+            elicitations = []; queuedMessages = []; editReview = nil
             diffContent = ""; diffLoading = false; diffRequest = UUID()
             previewRequest = UUID(); previewReadable = false; previewLoading = false; previewContent = ""; previewTitle = ""
             projectFolderEntries = nil; directoryRequest = UUID()
@@ -879,6 +897,8 @@ import Network
             throw GatewayFailure.invalidResponse
         }
         var mergedEntries = entries
+        let pageMeta = NativeEntryMeta.page(result["entries_meta"], count: entries.count)
+        var mergedMeta = pageMeta
         var mergedStart = pageStart
         let delta = result["delta"] as? Bool == true
         if delta, snapshot?.threadID != id { throw GatewayFailure.invalidResponse }
@@ -887,8 +907,11 @@ import Network
            pageStart <= old.entryStartIndex + old.entries.count {
             if entries.isEmpty && pageStart == old.entryStartIndex + old.entries.count {
                 mergedEntries = old.entries
+                mergedMeta = old.entryMeta.count == old.entries.count ? old.entryMeta : Array(repeating: nil, count: old.entries.count)
             } else {
                 mergedEntries = Array(old.entries.prefix(pageStart - old.entryStartIndex)) + entries
+                let previous = old.entryMeta.count == old.entries.count ? old.entryMeta : Array(repeating: nil, count: old.entries.count)
+                mergedMeta = Array(previous.prefix(pageStart - old.entryStartIndex)) + pageMeta
             }
             mergedStart = old.entryStartIndex
         } else if delta {
@@ -896,6 +919,7 @@ import Network
         }
         if snapshot?.threadID != id && mergedEntries.count > 24 {
             mergedStart += mergedEntries.count - 24
+            mergedMeta = Array(mergedMeta.suffix(24))
             mergedEntries = Array(mergedEntries.suffix(24))
         }
         let childApprovalRows = (result["subagents"] as? [[String: Any]] ?? []).flatMap { child in
@@ -974,7 +998,7 @@ import Network
                                   truncated: result["truncated"] as? Bool ?? false,
                                   activityTruncated: delta ? mergedStart > 0 : (result["activity_truncated"] as? Bool ?? false),
                                   pendingApprovals: approvals, rewindPoints: rewindPoints, subagents: uniqueSubagents,
-                                  agentError: NativeAgentError(snapshot: result))
+                                  agentError: NativeAgentError(snapshot: result), entryMeta: mergedMeta)
         let snapshotChanged = snapshot != nextSnapshot
         if snapshotChanged {
             snapshot = nextSnapshot
@@ -1614,6 +1638,8 @@ import Network
                   let entries = result["entries_markdown"] as? [String] else {
                 throw GatewayFailure.invalidResponse
             }
+            let pageMeta = NativeEntryMeta.page(result["entries_meta"], count: entries.count)
+            let currentMeta = current.entryMeta.count == current.entries.count ? current.entryMeta : Array(repeating: nil, count: current.entries.count)
             snapshot = ThreadSnapshot(threadID: current.threadID, title: current.title, status: current.status,
                                       currentTurnID: current.currentTurnID,
                                       instanceID: current.instanceID, epoch: current.epoch,
@@ -1625,7 +1651,8 @@ import Network
                                       activityEntries: current.activityEntries,
                                       truncated: start > 0, activityTruncated: current.activityTruncated,
                                       pendingApprovals: current.pendingApprovals, rewindPoints: current.rewindPoints,
-                                      subagents: current.subagents, agentError: current.agentError)
+                                      subagents: current.subagents, agentError: current.agentError,
+                                      entryMeta: pageMeta + currentMeta)
             scheduleCacheSave()
         } catch {
             if scope == operationScope { issue = error.localizedDescription }
@@ -1700,7 +1727,8 @@ import Network
                                              activityEntries: old.activityEntries,
                                              truncated: old.truncated, activityTruncated: old.activityTruncated,
                                              pendingApprovals: old.pendingApprovals, rewindPoints: old.rewindPoints,
-                                             subagents: old.subagents, agentError: old.agentError)
+                                             subagents: old.subagents, agentError: old.agentError,
+                                             entryMeta: old.entryMeta)
                         snapshot = old
                     }
                 } else {

@@ -14,7 +14,7 @@ struct ConnectionHelp: Equatable {
         case "Gateway request timed out. Check the phone's private route and retry.",
              "Could not connect to the gateway. Check the private route and address.",
              "Gateway connection dropped. Check the phone's private route and retry.":
-            return .init(title: "Gateway cannot be reached", detail: "Check that this phone's VPN can open the same HTTPS address in Safari, then retry the endpoint test.", action: .retry)
+            return .init(title: "Gateway cannot be reached", detail: "Open the saved HTTPS address in Safari. If Safari cannot find the server, check the VPN DNS route. If it times out, check that the private VPN route is passing traffic on this Wi-Fi. The app will retry while open.", action: .retry)
         case "HTTPS identity could not be verified. Check the hostname and certificate.", GatewayFailure.changedIdentity.localizedDescription:
             return .init(title: "Connection identity needs review", detail: "Check the hostname, certificate and gateway identity before pairing again. TLS verification stays enabled.", action: .connections)
         case "Pair this device first.", GatewayFailure.native("UNAUTHENTICATED").localizedDescription:

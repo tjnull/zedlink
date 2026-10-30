@@ -27,6 +27,12 @@ struct SessionsView: View {
             return left.title.localizedStandardCompare(right.title) == .orderedAscending
         }
     }
+    private var recentThreads: [NativeThread] {
+        guard search.isEmpty, filter == "All", session.state == .live else { return [] }
+        return library.recent.compactMap { recentKey in
+            session.threads.first { key($0) == recentKey }
+        }.prefix(3).map { $0 }
+    }
     var body: some View {
         NavigationStack(path: $navigationPath) {
             ScrollView {
@@ -49,6 +55,23 @@ struct SessionsView: View {
                         }.padding(.horizontal, 16)
                     }
                     Hairline()
+                    if session.state == .live && session.capabilities.contains("thread.create") {
+                        Button { showingNewSession = true } label: {
+                            Label("New Agent session", systemImage: "plus.circle.fill")
+                                .frame(maxWidth: .infinity, alignment: .leading).frame(minHeight: 44)
+                        }.buttonStyle(.bordered).padding(.horizontal, 16).padding(.vertical, 10)
+                    }
+                    if !recentThreads.isEmpty {
+                        SectionLabel("Recently opened").padding(.horizontal, 16).padding(.top, 8)
+                        ForEach(recentThreads) { thread in
+                            NavigationLink(value: thread.id) {
+                                SessionRow(thread: thread, live: session.state == .live && session.threads.contains(where: { $0.id == thread.id }), updated: library.updated.contains(key(thread)))
+                            }.buttonStyle(.plain).accessibilityIdentifier("thread-" + thread.id)
+                                .allowsHitTesting(!session.demoPreview)
+                                .simultaneousGesture(TapGesture().onEnded { dismissZedLinkKeyboard(); library.opened(key(thread)) })
+                            Hairline().padding(.leading, 16)
+                        }
+                    }
                     if visibleThreads.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text(session.profile == nil ? "Choose a connection" : session.visibleThreads.isEmpty ? (session.state == .live ? "No exposed sessions" : "Sessions unavailable") : "No matching sessions").font(.headline)
@@ -66,7 +89,9 @@ struct SessionsView: View {
                         }.padding(20)
                     }
                     ForEach(groups, id: \.self) { group in
-                        let rows = visibleThreads.filter { SessionActivity($0).group == group }
+                        let rows = visibleThreads.filter { thread in
+                            SessionActivity(thread).group == group && !recentThreads.contains { $0.id == thread.id }
+                        }
                         if !rows.isEmpty {
                             HStack { SectionLabel(group); Spacer(); Text("\(rows.count)").font(.caption.monospaced()).foregroundStyle(ZLTheme.muted) }
                                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 6)
@@ -76,7 +101,7 @@ struct SessionsView: View {
                                         SessionRow(thread: thread, live: session.state == .live && session.threads.contains(where: { $0.id == thread.id }), updated: library.updated.contains(key(thread)))
                                     }.buttonStyle(.plain).accessibilityIdentifier("thread-" + thread.id)
                                         .allowsHitTesting(!session.demoPreview)
-                                        .simultaneousGesture(TapGesture().onEnded { dismissZedLinkKeyboard(); library.seen(key(thread)) })
+                                        .simultaneousGesture(TapGesture().onEnded { dismissZedLinkKeyboard(); library.opened(key(thread)) })
                                     Button { library.toggle(key(thread)) } label: {
                                         Image(systemName: library.pins.contains(key(thread)) ? "pin.fill" : "pin")
                                             .foregroundStyle(library.pins.contains(key(thread)) ? ZLTheme.focus : ZLTheme.muted).frame(width: 44, height: 44)
@@ -208,6 +233,7 @@ private struct SessionRow: View {
 @MainActor struct ConversationView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var session: SessionManager
+    @EnvironmentObject private var library: SessionLibrary
     @ObservedObject private var composerLibrary = ComposerLibrary.shared
     let threadID: String
     @State private var showingClearConfirmation = false
@@ -222,6 +248,7 @@ private struct SessionRow: View {
     @State private var showingRename = false
     @State private var showingUnexposeConfirmation = false
     @State private var showingContext = false
+    @State private var contextInitialTab: WorkspaceTab = .files
     @State private var reviewExpanded = false
     @State private var selectedChildID: String?
     @State private var showingAgentHistory = false
@@ -236,6 +263,7 @@ private struct SessionRow: View {
     @State private var dismissedSlashDraft = ""
     @State private var followsConversation = true
     @State private var scrollHeight: CGFloat = 0
+    @State private var pendingReviewVisible = false
     @State private var userScrolling = false
     @State private var followScrollTask: Task<Void, Never>?
     @State private var proposedTitle = ""
@@ -293,8 +321,6 @@ private struct SessionRow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(ZLTheme.surface).accessibilityIdentifier("native-agent-error")
                 }
-                if session.state == .live && !snapshot.pendingApprovals.isEmpty { approvalStack(snapshot.pendingApprovals) }
-                if session.state == .live && !session.elicitations.isEmpty { elicitationStack }
                 if session.state == .live && (session.editReview != nil || !session.queuedMessages.isEmpty) { nativeControls }
             } else if let cached = session.cachedConversation(threadID) {
                 let detail = session.state != .live ? "Reconnect for current state and earlier messages."
@@ -330,6 +356,10 @@ private struct SessionRow: View {
         .toolbar(.hidden, for: .tabBar)
         .task(id: [threadID, session.profile?.id.uuidString ?? "", session.targetID ?? "", session.instanceID ?? "", session.epoch ?? "", String(session.state == .live), String(session.threads.contains(where: { $0.id == threadID }))]) {
             guard session.state == .live, session.threads.contains(where: { $0.id == threadID }) else { return }
+            if let profile = session.profile, let targetID = session.targetID {
+                let recentKey = SessionLibrary.key(profile: profile.gatewayID, target: targetID, thread: threadID)
+                if library.recent.first != recentKey { library.opened(recentKey) }
+            }
             lastKnownTitle = session.threads.first { $0.id == threadID }?.title ?? "Agent thread"
             if session.selectedThreadID != threadID || session.snapshot == nil { await session.select(threadID) }
             if let snapshot = session.snapshot, snapshot.threadID == threadID, !snapshot.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lastKnownTitle = snapshot.title }
@@ -420,7 +450,7 @@ private struct SessionRow: View {
             Button("Run /" + (session.localCommandConfirmation?.name ?? "")) { Task { await session.confirmLocalCommand() } }
         } message: { Text(session.localCommandConfirmation?.confirmation ?? "Confirm this desktop action.") }
         .onChange(of: session.localExposureStopped) { _, stopped in if stopped { dismiss() } }
-        .sheet(isPresented: $showingContext) { NativeContextSheet() }
+        .sheet(isPresented: $showingContext) { NativeContextSheet(initialTab: contextInitialTab) }
         .task(id: composerPhoto) {
             guard let composerPhoto else { return }
             let scope = session.operationScope
@@ -522,6 +552,7 @@ private struct SessionRow: View {
                 HStack(spacing: 8) {
                     backButton
                     headerTitle.frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                    changesButton
                     workspaceButton
                     headerActions
                 }
@@ -529,6 +560,7 @@ private struct SessionRow: View {
                     HStack(spacing: 8) {
                         backButton
                         Spacer(minLength: 0)
+                        changesButton
                         workspaceButton
                         headerActions
                     }
@@ -583,9 +615,15 @@ private struct SessionRow: View {
     }
 
     private var workspaceButton: some View {
-        Button { composerFocused = false; showingContext = true } label: {
+        Button { composerFocused = false; contextInitialTab = .files; showingContext = true } label: {
             Image(systemName: "square.grid.2x2").frame(width: 44, height: 44)
         }.accessibilityLabel("Workspace").accessibilityIdentifier("open-workspace")
+    }
+
+    private var changesButton: some View {
+        Button { composerFocused = false; contextInitialTab = .changes; showingContext = true } label: {
+            Image(systemName: "square.stack.3d.up").frame(width: 44, height: 44)
+        }.accessibilityLabel("Project changes").accessibilityIdentifier("open-changes")
     }
 
     private var headerActions: some View {
@@ -621,7 +659,19 @@ private struct SessionRow: View {
     }
 
     private func conversation(_ snapshot: ThreadSnapshot) -> some View {
-        ScrollViewReader { proxy in
+        let live = session.state == .live && session.snapshot?.threadID == snapshot.threadID
+        let linkedCalls = Set(snapshot.entryMeta.compactMap { $0?.callID })
+        let linkedQuestions = Set(snapshot.entryMeta.compactMap { $0?.elicitationID })
+        let fallbackApprovals = live ? snapshot.pendingApprovals.filter { $0.subagentID != nil || !linkedCalls.contains($0.id) } : []
+        let fallbackQuestions = live ? session.elicitations.filter { !linkedQuestions.contains($0.id) } : []
+        var matchingReviewIndex: Int? = nil
+        if let approval = snapshot.pendingApprovals.first, approval.subagentID == nil {
+            matchingReviewIndex = snapshot.entryMeta.firstIndex { $0?.callID == approval.id }
+        } else if snapshot.pendingApprovals.isEmpty, let question = session.elicitations.first {
+            matchingReviewIndex = snapshot.entryMeta.firstIndex { $0?.elicitationID == question.id }
+        }
+        let reviewIndex = live ? matchingReviewIndex.map { snapshot.entryStartIndex + $0 } : nil
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if snapshot.entries.isEmpty {
@@ -658,20 +708,18 @@ private struct SessionRow: View {
                         .padding(.horizontal, 16).padding(.vertical, 12)
                     }
                     ForEach(snapshot.entryStartIndex..<(snapshot.entryStartIndex + snapshot.entries.count), id: \.self) { entryIndex in
-                        let markdown = snapshot.entries[entryIndex - snapshot.entryStartIndex]
-                        VStack(alignment: .leading, spacing: 0) {
-                            NativeEntryView(markdown: markdown, index: entryIndex,
-                                            thinkingLive: snapshot.isBusy && entryIndex == snapshot.totalEntries - 1)
-                                .equatable()
-                            if session.state == .live, session.snapshot?.threadID == snapshot.threadID,
-                               !snapshot.isBusy, session.capabilities.contains("thread.rewind"),
-                               let point = snapshot.rewindPoints.first(where: { $0.entryIndex == entryIndex }) {
-                                Button("Rewind conversation here", role: .destructive) { rewindPoint = point }
-                                .font(.caption).padding(.horizontal, 16).padding(.bottom, 8)
-                            }
-                        }
+                        transcriptRow(snapshot, index: entryIndex, live: live)
                             .id(entryIndex)
+                            .background { if entryIndex == reviewIndex { reviewPosition } }
                         Hairline().padding(.horizontal, 14)
+                    }
+                    if !fallbackApprovals.isEmpty {
+                        approvalStack(fallbackApprovals).id("pending-review")
+                            .background { if reviewIndex == nil { reviewPosition } }
+                    }
+                    if !fallbackQuestions.isEmpty {
+                        elicitationStack(fallbackQuestions).id("pending-input")
+                            .background { if reviewIndex == nil && fallbackApprovals.isEmpty { reviewPosition } }
                     }
                     Color.clear.frame(height: 1).id("conversation-bottom")
                         .background(GeometryReader { geometry in
@@ -683,6 +731,9 @@ private struct SessionRow: View {
             .background(GeometryReader { geometry in Color.clear.preference(key: ConversationScrollMetrics.self, value: ["height": geometry.size.height]) })
             .onPreferenceChange(ConversationScrollMetrics.self) { metrics in
                 if let height = metrics["height"] { scrollHeight = height }
+                if let top = metrics["reviewTop"], let bottom = metrics["reviewBottom"], scrollHeight > 0 {
+                    pendingReviewVisible = min(bottom, scrollHeight) - max(top, 0) >= 44
+                } else { pendingReviewVisible = false }
                 if userScrolling, let bottom = metrics["bottom"], scrollHeight > 0 {
                     followsConversation = bottom >= 0 && bottom <= scrollHeight + 50
                     if followsConversation { unreadEntries = 0; newActivityWhileReading = false }
@@ -691,6 +742,16 @@ private struct SessionRow: View {
             .simultaneousGesture(DragGesture().onChanged { _ in userScrolling = true; followsConversation = false }.onEnded { _ in userScrolling = false })
             .scrollDismissesKeyboard(.interactively)
             .safeAreaInset(edge: .bottom, spacing: 0) {
+                if live && !pendingReviewVisible && (reviewIndex != nil || !fallbackApprovals.isEmpty || !fallbackQuestions.isEmpty) {
+                    Button {
+                        composerFocused = false
+                        if let reviewIndex { proxy.scrollTo(reviewIndex, anchor: .center) }
+                        else { proxy.scrollTo(fallbackApprovals.isEmpty ? "pending-input" : "pending-review", anchor: .center) }
+                    } label: {
+                        Label("Review pending action", systemImage: "hand.raised")
+                            .font(.caption).frame(maxWidth: .infinity, minHeight: 44)
+                    }.buttonStyle(.plain).background(ZLTheme.warning.opacity(0.1))
+                }
                 if !followsConversation {
                     HStack {
                         Spacer()
@@ -736,6 +797,37 @@ private struct SessionRow: View {
         }
     }
 
+    private var reviewPosition: some View {
+        GeometryReader { geometry in
+            Color.clear.preference(key: ConversationScrollMetrics.self, value: [
+                "reviewTop": geometry.frame(in: .named("conversation-scroll")).minY,
+                "reviewBottom": geometry.frame(in: .named("conversation-scroll")).maxY,
+            ])
+        }
+    }
+
+    private func transcriptRow(_ snapshot: ThreadSnapshot, index: Int, live: Bool) -> some View {
+        let offset = index - snapshot.entryStartIndex
+        let meta = snapshot.entryMeta.indices.contains(offset) ? snapshot.entryMeta[offset] : nil
+        let question = live ? session.elicitations.first { $0.id == meta?.elicitationID } : nil
+        return VStack(alignment: .leading, spacing: 0) {
+            if question == nil {
+                NativeEntryView(markdown: snapshot.entries[offset], index: index,
+                                thinkingLive: snapshot.isBusy && index == snapshot.totalEntries - 1)
+                    .equatable()
+            }
+            if let question { elicitationRow(question) }
+            if live, let approval = snapshot.pendingApprovals.first(where: { $0.subagentID == nil && $0.id == meta?.callID }) {
+                NativeApprovalView(approval: approval).padding(12)
+            }
+            if live, !snapshot.isBusy, session.capabilities.contains("thread.rewind"),
+               let point = snapshot.rewindPoints.first(where: { $0.entryIndex == index }) {
+                Button("Rewind conversation here", role: .destructive) { rewindPoint = point }
+                    .font(.caption).padding(.horizontal, 16).padding(.bottom, 8)
+            }
+        }
+    }
+
     private func approvalStack(_ approvals: [NativeApproval]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if approvals.count == 1 {
@@ -755,18 +847,18 @@ private struct SessionRow: View {
         .overlay(alignment: .top) { Hairline() }
     }
 
-    private var elicitationStack: some View {
+    private func elicitationStack(_ elicitations: [NativeElicitation]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            if session.elicitations.count > 2 {
-                Text("\(session.elicitations.count) input requests")
+            if elicitations.count > 2 {
+                Text("\(elicitations.count) input requests")
                     .font(.footnote.weight(.semibold)).padding(.horizontal, 16).padding(.top, 8)
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(session.elicitations) { elicitation in elicitationRow(elicitation) }
+                        ForEach(elicitations) { elicitation in elicitationRow(elicitation) }
                     }
                 }.frame(maxHeight: 180)
             } else {
-                ForEach(session.elicitations) { elicitation in elicitationRow(elicitation) }
+                ForEach(elicitations) { elicitation in elicitationRow(elicitation) }
             }
         }
         .background(ZLTheme.warning.opacity(0.07))
@@ -827,6 +919,16 @@ private struct SessionRow: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if session.state == .live, session.selectedThreadID == threadID,
+               let settings = session.threadSettings {
+                let agent = session.threads.first { $0.id == threadID }?.agentName ?? "Zed Agent"
+                let model = settings.models.first { $0.id == "\(settings.providerID ?? "")\n\(settings.modelID ?? "")" }?.name ?? settings.modelID
+                Button { showingModelControls = true } label: {
+                    Label(agent + (model.map { " · \($0)" } ?? ""), systemImage: "slider.horizontal.3")
+                        .font(.caption).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.plain).accessibilityLabel("Agent settings: " + agent + (model.map { ", model \($0)" } ?? ""))
+                    .padding(.horizontal, 12)
+            }
             if !session.attachments.isEmpty || !session.contextPaths.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack {
@@ -877,7 +979,7 @@ private struct SessionRow: View {
                                 composerFocused = false; showingRemoteClipboard = true
                             }
                             Button("Project context", systemImage: "folder.badge.plus") {
-                                composerFocused = false; showingContext = true
+                                composerFocused = false; contextInitialTab = .files; showingContext = true
                             }
                         }
                         Section("Draft tools") {
@@ -1107,8 +1209,11 @@ private enum WorkspaceTab: String, CaseIterable, Identifiable {
 private struct NativeContextSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var session: SessionManager
-    @State private var tab: WorkspaceTab = .files
+    @State private var tab: WorkspaceTab
     @State private var activityExpanded = true
+    @State private var selectedDiffLine: Int? = nil
+
+    init(initialTab: WorkspaceTab = .files) { _tab = State(initialValue: initialTab) }
 
     var body: some View {
         NavigationStack {
@@ -1169,24 +1274,48 @@ private struct NativeContextSheet: View {
                 }
             }
             .task(id: tab) { await session.loadProjectContext(page: WorkspacePage(rawValue: tab.rawValue.lowercased())) }
+            .onChange(of: session.changesRevision) { _, _ in selectedDiffLine = nil }
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 
     private var changes: some View {
-        VStack(spacing: 0) {
+        let diffIndex = ReviewIndex(session.diffContent)
+        return VStack(spacing: 0) {
             HStack {
                 Button("Refresh diff") { Task { await session.loadDiff() } }
                     .disabled(session.state != .live || !session.capabilities.contains("changes.diff") || session.changesRevision == nil || session.diffLoading)
                 Spacer()
-                Menu("Files · \(session.changes.count)") {
-                    ForEach(session.changes) { change in
-                        Button("\(change.staging == "staged" ? "Unstage" : "Stage") \(change.id)") { Task { await session.mutateChange(change) } }
-                            .disabled(session.state != .live || !session.capabilities.contains(change.staging == "staged" ? "changes.unstage" : "changes.stage"))
-                    }
-                }
+                Text("\(session.changes.count) files").font(.caption.monospaced()).foregroundStyle(ZLTheme.muted)
             }.padding(12)
+            if !session.changes.isEmpty {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(session.changes) { change in
+                            let section = diffIndex.sections.first { $0.title == change.id }
+                            let nextStart = section.flatMap { match in diffIndex.sections.first { $0.id > match.id }?.id } ?? (diffIndex.lines.count + 1)
+                            let loadedLines = section.map { match in diffIndex.lines.filter { $0.id >= match.id && $0.id < nextStart } } ?? []
+                            let added = loadedLines.filter { $0.kind == .added }.count
+                            let removed = loadedLines.filter { $0.kind == .removed }.count
+                            HStack(spacing: 8) {
+                                Button {
+                                    selectedDiffLine = section?.id
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(change.id).font(.footnote.monospaced()).lineLimit(2)
+                                        Text("\(change.status) · \(change.staging)" + (section == nil ? "" : " · +\(added) −\(removed) in loaded diff"))
+                                            .font(.caption).foregroundStyle(ZLTheme.muted)
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                }.buttonStyle(.plain).disabled(section == nil)
+                                Button(change.staging == "staged" ? "Unstage" : "Stage") { Task { await session.mutateChange(change) } }
+                                    .font(.caption).disabled(session.state != .live || !session.capabilities.contains(change.staging == "staged" ? "changes.unstage" : "changes.stage"))
+                            }.padding(.horizontal, 12).frame(minHeight: 52)
+                            Hairline()
+                        }
+                    }
+                }.frame(maxHeight: 188)
+            }
             if session.diffLoading { ProgressView("Loading diff…").frame(maxHeight: .infinity) }
             else if !session.capabilities.contains("changes.snapshot") {
                 ContentUnavailableView("Changes unavailable", systemImage: "lock")
@@ -1195,7 +1324,8 @@ private struct NativeContextSheet: View {
             } else if session.diffContent.isEmpty {
                 ContentUnavailableView("Review changes", systemImage: "doc.text", description: Text("Choose Refresh diff to load the current native revision."))
             } else {
-                CodeReviewView(content: session.diffContent, title: "Changes", diff: true, truncated: session.diffTruncated)
+                CodeReviewView(content: session.diffContent, title: "Changes", diff: true, truncated: session.diffTruncated, initialLine: selectedDiffLine)
+                    .id(selectedDiffLine)
             }
         }
     }

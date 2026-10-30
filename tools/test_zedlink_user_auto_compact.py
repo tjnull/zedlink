@@ -15,10 +15,12 @@ SPEC.loader.exec_module(helper)
 
 
 class NativeFixture:
-    def __init__(self, *, failed=False, busy_other=False, last_compaction_failed=False):
+    def __init__(self, *, failed=False, busy_other=False, last_compaction_failed=False,
+                 empty_summary=False):
         self.failed = failed
         self.busy_other = busy_other
         self.last_compaction_failed = last_compaction_failed
+        self.empty_summary = empty_summary
         self.sends = []
 
     def rpc(self, _socket, method, params, request_id=None):
@@ -34,12 +36,14 @@ class NativeFixture:
         if method == "thread.settings":
             return {"thread_id": "target", "status": "Idle", "configuration_owner": "zed",
                     "model": {"provider_id": "cali-llm", "id": "brain"},
-                    "context_usage": None if self.failed else {"used_tokens": 45000,
+                    "context_usage": None if self.failed or self.empty_summary else {"used_tokens": 45000,
                     "max_tokens": 65536, "input_tokens": 44000, "output_tokens": 1000}}
         if method == "thread.snapshot":
             return {**identity, "thread_id": "target", "status": "Idle",
                     "current_turn_id": None, "pending_approvals": [],
-                    "agent_error": ({"kind": "provider_rejection", "message":
+                    "agent_error": ({"kind": "other", "message":
+                        "Compaction produced an empty summary"} if self.empty_summary else
+                        {"kind": "provider_rejection", "message":
                         "This model's maximum context length is 65536 tokens; input exceeds this limit"}
                         if self.failed else None), "entries_markdown": [
                         "## Context Compaction (Failed)" if self.last_compaction_failed else "## Assistant"]}
@@ -83,7 +87,35 @@ class AutoCompactTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture = NativeFixture(failed=True, last_compaction_failed=True)
             self.assertEqual(self.run_poll(fixture, Path(directory) / "state.json"),
-                ["last-entry-compaction"])
+                ["sent"])
+            self.assertEqual(self.run_poll(fixture, Path(directory) / "state.json"),
+                ["already-reviewed"])
+            self.assertEqual(len(fixture.sends), 1)
+
+    def test_empty_summary_retries_once_without_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = NativeFixture(empty_summary=True, last_compaction_failed=True)
+            state_file = Path(directory) / "state.json"
+            self.assertEqual(self.run_poll(fixture, state_file), ["sent"])
+            self.assertEqual(self.run_poll(fixture, state_file), ["already-reviewed"])
+            self.assertEqual(len(fixture.sends), 1)
+            self.assertNotIn("Compaction produced an empty summary", state_file.read_text())
+
+    def test_other_error_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = NativeFixture(empty_summary=True)
+            fixture.empty_summary = False
+            original_rpc = fixture.rpc
+            def other_error_rpc(socket, method, params, request_id=None):
+                result = original_rpc(socket, method, params, request_id)
+                if method == "thread.snapshot":
+                    result["agent_error"] = {"kind": "other", "message": "Unrelated failure"}
+                return result
+            with patch.object(helper, "rpc", other_error_rpc):
+                args = types.SimpleNamespace(socket=Path("fixture"), state=Path(directory) / "state.json",
+                    provider="cali-llm", model="brain", threshold=40960, headroom=16384,
+                    dry_run=False, wait_for_new_instance=False)
+                self.assertEqual(helper.poll(args), ["not-ready"])
             self.assertEqual(fixture.sends, [])
 
 

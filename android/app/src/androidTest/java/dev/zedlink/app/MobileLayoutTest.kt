@@ -29,6 +29,28 @@ import org.junit.Test
 class MobileLayoutTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun changesShortcutOpensFileReviewFixture() {
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val application = instrumentation.targetContext.applicationContext as android.app.Application
+        // Presentation fixture only; it must not use an existing paired device.
+        org.junit.Assume.assumeTrue(application.getSharedPreferences("zedlink-profile", 0).all.isEmpty())
+        val store = androidx.lifecycle.ViewModelStore()
+        lateinit var model: ZedLinkViewModel
+        compose.runOnIdle { model = ZedLinkViewModel(application); store.put("changes-fixture", model) }
+        val fixture = AppState(live = true, selectedThreadId = "fixture", instanceId = "fixture", epoch = "fixture",
+            changes = listOf(NativeChange("src/example.kt", "modified", "unstaged")), changesRevision = "fixture",
+            previewTitle = "Working tree diff",
+            previewContent = "diff --git a/src/example.kt b/src/example.kt\n--- a/src/example.kt\n+++ b/src/example.kt\n-old\n+new\n")
+        try {
+            compose.setContent { ZedLinkTheme("dark") { ProjectContextScreen(fixture, model, initialPage = "Changes") {} } }
+            compose.onNodeWithText("GIT CHANGES · 1 FILE").assertIsDisplayed()
+            compose.onNodeWithText("src/example.kt").assertIsDisplayed()
+            compose.onNodeWithText("+1  −1 in loaded diff").assertIsDisplayed()
+        } finally {
+            compose.runOnIdle { store.clear() }
+        }
+    }
+
     @Test fun actualWorkspaceKeepsTypedDraftVisibleWithSoftwareKeyboard() {
         val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
         val application = instrumentation.targetContext.applicationContext as android.app.Application

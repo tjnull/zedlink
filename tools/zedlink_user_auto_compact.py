@@ -70,6 +70,12 @@ def is_context_limit_error(error):
     return "maximum context length" in message and "exceeds this limit" in message
 
 
+def is_empty_summary_error(error):
+    return (isinstance(error, dict)
+            and error.get("kind") == "other"
+            and error.get("message") == "Compaction produced an empty summary")
+
+
 def check_thread(args, state, identity, thread):
     if thread.get("status") != "Idle" or thread.get("current_turn_id") is not None:
         return "busy"
@@ -90,15 +96,21 @@ def check_thread(args, state, identity, thread):
         return "not-ready"
     error = snapshot.get("agent_error")
     context_limit_error = is_context_limit_error(error)
-    if error and not context_limit_error:
+    empty_summary_error = is_empty_summary_error(error)
+    if error and not (context_limit_error or empty_summary_error):
         return "not-ready"
     last_entry = (snapshot.get("entries_markdown") or [""])[-1]
-    if last_entry.startswith("## Context Compaction ("):
+    if last_entry.startswith(("## Context Compaction (Completed)",
+                              "## Context Compaction (In Progress)")):
         return "last-entry-compaction"
 
     usage = settings.get("context_usage") or {}
     used, maximum = usage.get("used_tokens"), usage.get("max_tokens")
-    if context_limit_error:
+    if empty_summary_error:
+        # A failed native compaction leaves the thread intact. Retry this exact
+        # failure only once; the saved marker prevents a repeating model call.
+        marker = ["empty-summary", hashlib.sha256(error["message"].encode()).hexdigest()]
+    elif context_limit_error:
         # Zed clears latest_token_usage after a rejected request. Bind the one
         # recovery attempt to this exact rejection, without storing its text.
         marker = ["context-limit", hashlib.sha256(error["message"].encode()).hexdigest()]

@@ -22,11 +22,13 @@ enum SessionActivity: String, CaseIterable {
 @MainActor final class SessionLibrary: ObservableObject {
     @Published private(set) var pins: Set<String>
     @Published private(set) var updated: Set<String> = []
+    @Published private(set) var recent: [String]
     private var signatures: [String: NativeThread] = [:]
     private let defaults: UserDefaults
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         pins = Set(defaults.stringArray(forKey: "zedlink.sessionPins") ?? [])
+        recent = defaults.stringArray(forKey: "zedlink.sessionRecent") ?? []
     }
     static func key(profile: String, target: String, thread: String) -> String {
         // Persist conversation identity, never connection epoch or transcript data.
@@ -48,4 +50,9 @@ enum SessionActivity: String, CaseIterable {
         }
     }
     func seen(_ key: String) { updated.remove(key) }
+    func opened(_ key: String) {
+        recent = [key] + Array(recent.filter { $0 != key }.prefix(19))
+        defaults.set(recent, forKey: "zedlink.sessionRecent")
+        seen(key)
+    }
 }

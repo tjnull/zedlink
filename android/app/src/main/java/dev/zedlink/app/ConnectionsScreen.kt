@@ -106,6 +106,9 @@ data class ConnectionDraft(
     var draft by remember(profile.id) { mutableStateOf(ConnectionDraft.edit(profile)) }
     var removing by remember { mutableStateOf(false) }
     var identity by remember { mutableStateOf(false) }
+    var checkingHTTPS by remember(profile.id) { mutableStateOf(false) }
+    var httpsResult by remember(profile.id) { mutableStateOf("") }
+    val checkScope = rememberCoroutineScope()
     if (editing) ConnectionEditor(state, model, draft, { draft = it }, { editing = false })
     if (removing) AlertDialog(onDismissRequest = { removing = false }, title = { Text("Remove saved connection?") }, text = {
         val linked = state.profiles.any { it.id != profile.id && it.gatewayId.equals(profile.gatewayId, true) }
@@ -120,6 +123,18 @@ data class ConnectionDraft(
             if (state.issue.isNotBlank()) Text(state.issue, color = MaterialTheme.colorScheme.error)
         } else Text("Saved · status not checked", color = Muted)
         TextButton(onClick = { model.connect(profile) }, enabled = !state.connecting && !state.connectionBusy) { Text(if (state.profile?.id == profile.id) "Reconnect" else "Connect") }
+        TextButton(onClick = {
+            checkingHTTPS = true; httpsResult = ""
+            checkScope.launch {
+                try {
+                    val observed = GatewayClient(profile, null).gatewayId()
+                    httpsResult = if (observed.equals(profile.gatewayId, true)) "HTTPS route and gateway identity verified now."
+                        else "HTTPS reached a different gateway identity. Review this saved address."
+                } catch (error: Exception) { httpsResult = connectionFailure(error) }
+                finally { checkingHTTPS = false }
+            }
+        }, enabled = !checkingHTTPS) { Text(if (checkingHTTPS) "Checking HTTPS…" else "Check HTTPS and identity") }
+        if (httpsResult.isNotBlank()) Text(httpsResult, color = if (httpsResult.startsWith("HTTPS route")) Muted else MaterialTheme.colorScheme.error, fontSize = 12.sp)
         TextButton(onClick = { draft = ConnectionDraft.edit(profile); editing = true }, enabled = !state.connecting && !state.connectionBusy) { Text("Edit connection") }
         TextButton(onClick = { identity = !identity }) { Text(if (identity) "Hide address & identity" else "Address & identity") }
         if (identity) {

@@ -34,6 +34,7 @@ data class AppState(
     val connectionIssue: String = "",
     val threads: List<NativeThread> = emptyList(),
     val pinnedThreads: Set<String> = emptySet(),
+    val recentThreadIds: List<String> = emptyList(),
     val updatedThreads: Set<String> = emptySet(),
     val selectedThreadId: String? = null,
     val snapshot: ThreadSnapshot? = null,
@@ -380,13 +381,20 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
     fun selectThread(id: String) = viewModelScope.launch {
         if (state.selectedThreadId != id) childHistory.clear()
         if (state.threads.none { it.id == id }) return@launch
+        val recent = (listOf(id) + state.recentThreadIds.filter { it != id }).take(20)
+        preferences.edit().putString(sessionRecentKey(), recent.joinToString("\n")).apply()
         val generation = connectionGeneration
         val draft = draftStorageKey(state.profile?.gatewayId, state.targetId, id)?.let { preferences.getString(it, "") }.orEmpty()
         previewRequest += 1; directoryRequest += 1
         state = state.clearProjectAccess().copy(
             selectedThreadId = id,
+            recentThreadIds = recent,
             snapshot = null,
             commands = emptyList(),
+            elicitations = emptyList(),
+            queuedMessages = emptyList(),
+            editReview = null,
+            threadSettings = null,
             draft = draft,
             issue = "",
             sending = false,
@@ -625,8 +633,11 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
             val start = result.optInt("entry_start_index", -1)
             val entries = result.optJSONArray("entries_markdown").strings()
             if (start < 0 || start + entries.size != old.entryStartIndex) return@launch
+            val pageMeta = NativeEntryMeta.page(result.optJSONArray("entries_meta"), entries.size)
+            val currentMeta = current.entryMeta.takeIf { it.size == current.entries.size } ?: List(current.entries.size) { null }
             state = state.copy(snapshot = current.copy(
                 entries = entries + current.entries,
+                entryMeta = pageMeta + currentMeta,
                 entryStartIndex = start,
                 totalEntries = maxOf(current.totalEntries, result.optInt("total_entries")),
                 hasOlderEntries = start > 0,
@@ -740,12 +751,14 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
         val selected = state.selectedThreadId?.takeIf { id -> threads.any { it.id == id } }
         state = state.copy(threads = threads, selectedThreadId = selected,
             pinnedThreads = preferences.getStringSet(sessionPinsKey(), emptySet()).orEmpty().toSet(),
+            recentThreadIds = preferences.getString(sessionRecentKey(), "").orEmpty().lines().filter { it.isNotBlank() },
             updatedThreads = (state.updatedThreads + changed) - setOfNotNull(selected),
             snapshot = if (selected == null) null else state.snapshot)
     }
 
     private val sessionCounts = mutableMapOf<String, Pair<Long, NativeThread>>()
     private fun sessionPinsKey() = "sessionPins." + listOf(state.profile?.gatewayId, state.targetId).joinToString("\n")
+    private fun sessionRecentKey() = "sessionRecent." + listOf(state.profile?.gatewayId, state.targetId).joinToString("\n")
     fun toggleSessionPin(id: String) {
         val pins = if (id in state.pinnedThreads) state.pinnedThreads - id else state.pinnedThreads + id
         preferences.edit().putStringSet(sessionPinsKey(), pins).apply()
@@ -764,6 +777,7 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
         checkIdentity(result)
         if (state.selectedThreadId != id) return
         val pageEntries = result.optJSONArray("entries_markdown").strings()
+        val pageMeta = NativeEntryMeta.page(result.optJSONArray("entries_meta"), pageEntries.size)
         val pageStart = result.optInt("entry_start_index", 0)
         val pageEnd = result.optInt("entry_end_index", pageStart + pageEntries.size)
         val totalEntries = result.optInt("total_entries", pageEnd)
@@ -776,6 +790,11 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
             && pageStart <= old.entryStartIndex + old.entries.size
         val mergedStart = if (canMerge) old!!.entryStartIndex else pageStart
         val mergedEntries = if (canMerge) old!!.entries.take(pageStart - old.entryStartIndex) + pageEntries else pageEntries
+        val mergedMeta = if (canMerge) {
+            val prefixCount = pageStart - old!!.entryStartIndex
+            val previous = old.entryMeta.takeIf { it.size == old.entries.size } ?: List(old.entries.size) { null }
+            previous.take(prefixCount) + pageMeta
+        } else pageMeta
         val approvalRows = result.optJSONArray("pending_approvals").objects() +
             result.optJSONArray("subagents").objects().flatMap { child ->
                 child.optJSONArray("pending_approvals").objects()
@@ -817,7 +836,7 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
                 else child
                 childHistory[child.id] = ChildHistory(childScope(), merged.entryStartIndex, merged.entryStartIndex + merged.entries.size, merged.entries)
                 merged
-            }, agentError = NativeAgentError.decode(result)))
+            }, agentError = NativeAgentError.decode(result), entryMeta = mergedMeta))
         lastChildSnapshot = System.currentTimeMillis()
         approvalNotifications.update(state)
         approvalNotifications.notifyCompaction(state, id, state.snapshot?.currentTurnId,
@@ -1049,7 +1068,12 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
                     .optJSONArray("sessions").objects().mapNotNull(::decodeDebuggerSession)
             } else emptyList()
             if (!current()) return@launch
+            val staleDiff = revision != state.changesRevision && state.previewTitle == "Working tree diff"
             state = state.copy(projectFiles = files, changes = entries, changesRevision = revision, terminals = terminals,
+                previewTitle = if (staleDiff) "" else state.previewTitle,
+                previewContent = if (staleDiff) "" else state.previewContent,
+                previewLoading = if (staleDiff) false else state.previewLoading,
+                previewTruncated = if (staleDiff) false else state.previewTruncated,
                 terminalSnapshot = state.terminalSnapshot?.takeIf { snapshot -> terminals.any { it.id == snapshot.terminal.id } },
                 configuredTasks = configuredTasks, debuggerCatalog = debuggerCatalog, debuggerSessions = debuggerSessions)
             if (state.terminalSnapshot == null) {
@@ -1350,11 +1374,33 @@ class ZedLinkViewModel(application: Application) : AndroidViewModel(application)
             state = state.copy(contextPaths = state.contextPaths + path, contextScope = projectAccessScope(state))
         }
     }
-    fun loadDiff() = viewModelScope.launch { try {
-        val result = client!!.rpc("changes.diff", JSONObject().put("instance_id", state.instanceId).put("epoch", state.epoch).put("thread_id", state.selectedThreadId).put("revision", state.changesRevision))
-        state = state.copy(previewTitle = "Working tree diff", previewContent = result.optString("diff", "Diff is still loading."),
-            previewReadable = false, previewLoading = false, previewError = "", previewTruncated = result.optBoolean("truncated"))
-    } catch (error: Exception) { state = state.copy(issue = error.message.orEmpty()) } }
+    fun loadDiff() = viewModelScope.launch {
+        val activeClient = client ?: return@launch
+        val revision = state.changesRevision ?: return@launch
+        val scope = listOf(state.profile?.gatewayId, state.targetId, state.instanceId, state.epoch, state.selectedThreadId)
+        if (!state.live || "changes.diff" !in state.capabilities) return@launch
+        fun current() = scope == listOf(state.profile?.gatewayId, state.targetId, state.instanceId, state.epoch, state.selectedThreadId) && revision == state.changesRevision && activeClient === client
+        state = state.copy(previewTitle = "Working tree diff", previewContent = "", previewLoading = true, previewTruncated = false)
+        try {
+            repeat(40) {
+                val result = activeClient.rpc("changes.diff", JSONObject().put("instance_id", scope[2]).put("epoch", scope[3])
+                    .put("thread_id", scope[4]).put("revision", revision))
+                if (!current()) return@launch
+                if (result.optString("revision") != revision) throw GatewayException("Diff revision changed. Refresh Changes.")
+                when (result.optString("outcome")) {
+                    "ready" -> {
+                        state = state.copy(previewContent = result.optString("diff").ifEmpty { "No textual diff at this revision." },
+                            previewLoading = false, previewTruncated = result.optBoolean("truncated"))
+                        return@launch
+                    }
+                    "loading" -> delay(250)
+                    else -> throw GatewayException("Diff is unavailable at this revision.")
+                }
+            }
+            throw GatewayException("Diff is still loading. Refresh again to check its status.")
+        } catch (error: CancellationException) { throw error }
+        catch (error: Exception) { if (current()) state = state.copy(issue = error.message.orEmpty(), previewLoading = false) }
+    }
     fun mutateChange(change: NativeChange) = viewModelScope.launch { try {
         val method = if (change.staging == "staged") "changes.unstage" else "changes.stage"
         client!!.rpc(method, JSONObject().put("instance_id", state.instanceId).put("epoch", state.epoch).put("thread_id", state.selectedThreadId)

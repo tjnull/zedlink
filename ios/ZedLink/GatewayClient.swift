@@ -8,6 +8,17 @@ enum GatewayFailure: LocalizedError {
     case status(Int)
     case native(String)
 
+    var isTransientRouteFailure: Bool {
+        guard case .native(let message) = self else { return false }
+        return [
+            "No network connection. Check the phone's network settings.",
+            "Gateway name could not be resolved. Check the saved hostname and VPN DNS route.",
+            "Gateway request timed out. Check the phone's private route and retry.",
+            "Could not connect to the gateway. Check the private route and address.",
+            "Gateway connection dropped. Check the phone's private route and retry."
+        ].contains(message)
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint: "Enter a valid HTTPS address without credentials, query, or fragment."

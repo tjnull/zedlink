@@ -147,6 +147,8 @@ private fun SessionsScreen(state: AppState, model: ZedLinkViewModel, showConnect
         ("${it.title} ${it.agentName} ${it.id}".contains(query, true)) &&
             (filter == "All" || filter == "Needs attention" && activity.attention || filter == "Running" && activity.running || filter == "Pinned" && it.id in state.pinnedThreads)
     }.sortedWith(compareByDescending<NativeThread> { it.id in state.pinnedThreads }.thenBy { it.title.lowercase() })
+    val recentThreads = if (query.isBlank() && filter == "All") state.recentThreadIds.mapNotNull { id -> threads.firstOrNull { it.id == id } }.take(3) else emptyList()
+    val recentIds = recentThreads.map { it.id }.toSet()
     LazyColumn(Modifier.fillMaxSize()) {
         item {
             Header("Sessions", "") {
@@ -168,6 +170,19 @@ private fun SessionsScreen(state: AppState, model: ZedLinkViewModel, showConnect
                 }
             }
             Spacer(Modifier.height(6.dp))
+            if (state.live && "thread.create" in state.capabilities) {
+                OutlinedButton(onClick = { showingNew = true }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("New Agent session")
+                }
+            }
+        }
+        if (recentThreads.isNotEmpty()) {
+            item { SectionHeading("RECENTLY OPENED", recentThreads.size.toString()) }
+            items(recentThreads, key = { "recent:${it.id}" }) { thread ->
+                ThreadRow(thread, state.live, thread.id in state.pinnedThreads, thread.id in state.updatedThreads, { model.toggleSessionPin(thread.id) }) {
+                    focusManager.clearFocus(force = true); model.selectThread(thread.id)
+                }
+            }
         }
         if (threads.isEmpty()) item {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -176,7 +191,7 @@ private fun SessionsScreen(state: AppState, model: ZedLinkViewModel, showConnect
             }
         }
         listOf("Needs attention", "Running", "Ready & other").forEach { group ->
-            val rows = threads.filter { SessionActivity.from(it).group == group }
+            val rows = threads.filter { SessionActivity.from(it).group == group && it.id !in recentIds }
             if (rows.isNotEmpty()) {
                 item { SectionHeading(group.uppercase(), rows.size.toString()) }
                 items(rows, key = { it.id }) { thread ->
@@ -318,7 +333,7 @@ private fun ConversationScreen(state: AppState, model: ZedLinkViewModel) {
     var showActions by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
     var showUnexpose by remember { mutableStateOf(false) }
-    var showContext by remember { mutableStateOf(false) }
+    var showContextPage by remember { mutableStateOf<String?>(null) }
     var showAgentHistory by remember { mutableStateOf(false) }
     var historyChildId by remember(state.selectedThreadId) { mutableStateOf<String?>(null) }
     var lastKnownTitle by remember(state.selectedThreadId, state.instanceId, state.epoch) { mutableStateOf(state.threads.firstOrNull { it.id == state.selectedThreadId }?.title ?: "Agent thread") }
@@ -341,8 +356,8 @@ private fun ConversationScreen(state: AppState, model: ZedLinkViewModel) {
     var showAgentSettings by remember { mutableStateOf(false) }
     if (showAgentSettings) AgentSettingsDialog(state, model) { showAgentSettings = false }
     var proposedTitle by remember(snapshot?.threadId) { mutableStateOf(snapshot?.title.orEmpty()) }
-    if (showContext) {
-        ProjectContextScreen(state, model) { showContext = false }
+    if (showContextPage != null) {
+        ProjectContextScreen(state, model, showContextPage ?: "Terminal") { showContextPage = null }
         return
     }
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
@@ -354,8 +369,9 @@ private fun ConversationScreen(state: AppState, model: ZedLinkViewModel) {
                     color = if (!state.live) Warning else if (snapshot?.isBusy == true) Blue else Muted,
                     fontSize = 11.sp)
             }
-            Box {
-                IconButton(onClick = { showContext = true; model.loadProjectContext() }) { Icon(Icons.Default.GridView, "Workspace", tint = Ink) }
+            Row {
+                IconButton(onClick = { showContextPage = "Changes"; model.loadProjectContext() }) { Icon(Icons.Default.Edit, "Project changes", tint = Ink) }
+                IconButton(onClick = { showContextPage = "Terminal"; model.loadProjectContext() }) { Icon(Icons.Default.GridView, "Workspace", tint = Ink) }
             }
             Box {
                 IconButton(onClick = { showActions = true }) { Icon(Icons.Default.MoreVert, "Session actions", tint = Ink) }
@@ -432,8 +448,9 @@ private fun ConversationScreen(state: AppState, model: ZedLinkViewModel) {
 }
 
 @Composable
-internal fun ProjectContextScreen(state: AppState, model: ZedLinkViewModel, close: () -> Unit) {
-    var page by rememberSaveable(state.selectedThreadId) { mutableStateOf("Terminal") }
+internal fun ProjectContextScreen(state: AppState, model: ZedLinkViewModel, initialPage: String = "Terminal", close: () -> Unit) {
+    var page by rememberSaveable(state.selectedThreadId, initialPage) { mutableStateOf(initialPage) }
+    var selectedDiffPath by remember(state.selectedThreadId) { mutableStateOf<String?>(null) }
     var fullFiles by remember { mutableStateOf(false) }
     var terminalOnly by rememberSaveable { mutableStateOf(false) }
     val keyboardVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
@@ -476,16 +493,38 @@ internal fun ProjectContextScreen(state: AppState, model: ZedLinkViewModel, clos
                             TextButton(onClick = { fullFiles = true }) { Icon(Icons.Default.FolderOpen, null); Text("Browse files and folders") }
                         }
                         "Changes" -> {
-                            if (state.previewTitle == "Working tree diff" && state.previewContent.isNotEmpty()) {
-                                Text(state.previewTitle, fontWeight = FontWeight.SemiBold)
-                                SelectionContainer { Text(state.previewContent, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                            Text("GIT CHANGES · ${state.changes.size} ${if (state.changes.size == 1) "FILE" else "FILES"}",
+                                style = monoLabel(), modifier = Modifier.padding(top = 12.dp))
+                            TextButton(onClick = model::loadDiff, enabled = state.live && state.changesRevision != null && "changes.diff" in state.capabilities && !state.previewLoading) { Text("LOAD FULL DIFF") }
+                            if (state.previewLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            if (state.changes.isEmpty()) Text("No working tree changes", color = Muted)
+                            state.changes.forEach { change ->
+                                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f).clickable { selectedDiffPath = change.id; if (state.previewTitle != "Working tree diff") model.loadDiff() }) {
+                                        Text(change.id, maxLines = 2, overflow = TextOverflow.Ellipsis, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                                        Text("${change.status} · ${change.staging}", color = Muted, fontSize = 11.sp)
+                                    }
+                                    TextButton(onClick = { model.mutateChange(change) },
+                                        enabled = state.live && ((if (change.staging == "staged") "changes.unstage" else "changes.stage") in state.capabilities)) {
+                                        Text(if (change.staging == "staged") "UNSTAGE" else "STAGE")
+                                    }
+                                }
+                                Rule()
                             }
-                            Text("GIT CHANGES", style = monoLabel(), modifier = Modifier.padding(top = 12.dp))
-                            TextButton(onClick = model::loadDiff) { Text("LOAD FULL DIFF") }
-                            state.changes.forEach { change -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text("${change.id}\n${change.status} · ${change.staging}", modifier = Modifier.weight(1f), fontSize = 12.sp)
-                                TextButton(onClick = { model.mutateChange(change) }) { Text(if (change.staging == "staged") "UNSTAGE" else "STAGE") }
-                            } }
+                            if (state.previewTitle == "Working tree diff" && state.previewContent.isNotEmpty()) {
+                                val selected = selectedDiffPath?.let { path -> diffSection(state.previewContent, path) }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(selectedDiffPath ?: state.previewTitle, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).padding(top = 14.dp))
+                                    if (selectedDiffPath != null) TextButton(onClick = { selectedDiffPath = null }) { Text("ALL FILES") }
+                                }
+                                if (selectedDiffPath != null && selected == null) Text("This file is outside the loaded diff. Showing the available diff.", color = Warning, fontSize = 11.sp)
+                                if (state.previewTruncated) Text("Partial diff · native size limit", color = Warning, fontSize = 11.sp)
+                                val shown = selected ?: state.previewContent
+                                val added = shown.lineSequence().count { it.startsWith("+") && !it.startsWith("+++") }
+                                val removed = shown.lineSequence().count { it.startsWith("-") && !it.startsWith("---") }
+                                Text("+$added  −$removed in loaded diff", color = Muted, fontSize = 11.sp)
+                                SelectionContainer { Text(shown, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                            }
                         }
                         "Tasks" -> {
                             if ("task.catalog" in state.capabilities) {
@@ -567,6 +606,14 @@ internal fun ProjectContextScreen(state: AppState, model: ZedLinkViewModel, clos
     }
 }
 
+private fun diffSection(content: String, path: String): String? {
+    val sections = content.split(Regex("(?m)(?=^diff --git )"))
+    return sections.firstOrNull { section ->
+        val header = section.lineSequence().firstOrNull().orEmpty()
+        header.endsWith(" b/$path") || header.endsWith(" \"b/$path\"")
+    }?.takeIf { it.startsWith("diff --git ") }
+}
+
 @Composable
 private fun Messages(snapshot: ThreadSnapshot, model: ZedLinkViewModel, modifier: Modifier = Modifier) {
     var selectedChildId by remember(snapshot.threadId) { mutableStateOf<String?>(null) }
@@ -585,6 +632,24 @@ private fun Messages(snapshot: ThreadSnapshot, model: ZedLinkViewModel, modifier
     }
     val activeChildren = snapshot.subagents.filter { child -> child.isActive || snapshot.approvals.any { it.subagentId == child.id } }
     val headerCount = (if (snapshot.hasOlderEntries) 1 else 0) + (if (activeChildren.isNotEmpty()) 1 else 0) + activeChildren.size
+    val rootApprovals = snapshot.approvals.filter { it.subagentId == null }
+    val linkedApprovalIds = snapshot.entryMeta.mapNotNull { it?.callId }.toSet()
+    val linkedQuestionIds = snapshot.entryMeta.mapNotNull { it?.elicitationId }.toSet()
+    val fallbackApprovals = snapshot.approvals.filter { it.subagentId != null || it.id !in linkedApprovalIds }
+    val fallbackQuestions = model.state.elicitations.filter { it.id !in linkedQuestionIds }
+    val firstApproval = snapshot.approvals.firstOrNull()
+    val firstQuestion = model.state.elicitations.firstOrNull()
+    val reviewTargetIndex = when {
+        firstApproval != null -> snapshot.entryMeta.indexOfFirst { it?.callId == firstApproval.id }
+            .takeIf { it >= 0 }?.let { headerCount + it }
+            ?: fallbackApprovals.indexOfFirst { it.id == firstApproval.id }.takeIf { it >= 0 }
+                ?.let { headerCount + snapshot.entries.size + it }
+        firstQuestion != null -> snapshot.entryMeta.indexOfFirst { it?.elicitationId == firstQuestion.id }
+            .takeIf { it >= 0 }?.let { headerCount + it }
+            ?: fallbackQuestions.indexOfFirst { it.id == firstQuestion.id }.takeIf { it >= 0 }
+                ?.let { headerCount + snapshot.entries.size + fallbackApprovals.size + it }
+        else -> null
+    }
     fun jumpToMatch(index: Int) {
         val absolute = matches.getOrNull(index) ?: return
         chosenMatch = absolute
@@ -642,17 +707,28 @@ private fun Messages(snapshot: ThreadSnapshot, model: ZedLinkViewModel, modifier
         }
         itemsIndexed(snapshot.entries, key = { index, _ -> snapshot.entryStartIndex + index }) { index, markdown ->
             val absoluteIndex = snapshot.entryStartIndex + index
-            Message(NativeEntry.parse(markdown), snapshot.isBusy && index == snapshot.entries.lastIndex)
+            val meta = snapshot.entryMeta.getOrNull(index)
+            val question = model.state.elicitations.firstOrNull { it.id == meta?.elicitationId }
+            if (question == null) Message(NativeEntry.parse(markdown), snapshot.isBusy && index == snapshot.entries.lastIndex)
+            question?.let { ElicitationCard(it, model) }
+            rootApprovals.firstOrNull { it.id == meta?.callId }?.let { ApprovalCard(it, model::respondApproval) }
             snapshot.rewindPoints.firstOrNull { it.entryIndex == absoluteIndex }?.let { point ->
                 if (!snapshot.isBusy && "thread.rewind" in model.state.capabilities) {
                     TextButton(onClick = { rewindPoint = point }) { Text("REWIND CONVERSATION HERE", color = Warning) }
                 }
             }
         }
-        items(snapshot.approvals, key = { "approval:${it.subagentId}:${it.turnId}:${it.id}" }) { ApprovalCard(it, model::respondApproval) }
-        items(model.state.elicitations, key = { "elicitation:${it.id}" }) { ElicitationCard(it, model) }
+        items(fallbackApprovals, key = { "approval:${it.subagentId}:${it.turnId}:${it.id}" }) { ApprovalCard(it, model::respondApproval) }
+        items(fallbackQuestions, key = { "elicitation:${it.id}" }) { ElicitationCard(it, model) }
         model.state.editReview?.let { review -> item("edit-review") { EditReviewCard(review, model) } }
         if (model.state.queuedMessages.isNotEmpty()) item("queue") { QueueCard(model.state.queuedMessages, model) }
+    }
+    if (reviewTargetIndex != null && list.layoutInfo.visibleItemsInfo.none { it.index == reviewTargetIndex }) {
+        TextButton(onClick = { scrollScope.launch { list.animateScrollToItem(reviewTargetIndex) } }, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+            Icon(Icons.Default.Warning, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Review pending action")
+        }
     }
     if (!following) TextButton(onClick = { following = true }, modifier = Modifier.fillMaxWidth()) {
         val unread = (snapshot.totalEntries - lastReadTotal).coerceAtLeast(0)
@@ -886,6 +962,14 @@ private fun Composer(state: AppState, model: ZedLinkViewModel, commands: () -> U
     val canCancel = state.live && state.snapshot?.currentTurnId != null && "thread.cancel" in state.capabilities
     val sendEnabled = state.live && (state.draft.isNotBlank() || state.attachments.isNotEmpty() || state.contextPaths.isNotEmpty()) && !state.sending
     val shape = RoundedCornerShape(22.dp)
+    Column(Modifier.fillMaxWidth()) {
+    if (state.live) state.threadSettings?.let { settings ->
+        val agent = state.threads.firstOrNull { it.id == state.selectedThreadId }?.agentName ?: "Zed Agent"
+        val modelName = settings.models.firstOrNull { it.modelId == settings.modelId && it.providerId == settings.providerId }?.name ?: settings.modelId
+        Text(agent + (modelName?.let { " · $it" } ?: ""), color = Muted, fontSize = 11.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 2.dp))
+    }
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp)) {
         val narrow = maxWidth < 420.dp
         val actions: @Composable () -> Unit = {
@@ -916,6 +1000,7 @@ private fun Composer(state: AppState, model: ZedLinkViewModel, commands: () -> U
             ComposerDraftField(state, model, Modifier.weight(1f).heightIn(min = 44.dp, max = 140.dp).padding(11.dp), submit)
             finish()
         }
+    }
     }
 }
 

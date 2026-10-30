@@ -98,6 +98,19 @@ data class NativeSubagent(val id: String, val title: String, val status: String,
 }
 data class NativeProjectFile(val id: String, val kind: String, val size: Int?)
 data class NativeChange(val id: String, val status: String, val staging: String)
+data class NativeEntryMeta(val kind: String, val callId: String?, val elicitationId: String?) {
+    companion object {
+        fun page(value: org.json.JSONArray?, count: Int): List<NativeEntryMeta?> {
+            if (value == null || value.length() != count) return List(count) { null }
+            return (0 until count).map { index ->
+                value.optJSONObject(index)?.let { row ->
+                    NativeEntryMeta(row.optString("kind"), row.optString("call_id").takeIf(String::isNotBlank),
+                        row.optString("elicitation_id").takeIf(String::isNotBlank))
+                }
+            }
+        }
+    }
+}
 data class PromptImageAttachment(val id: String = java.util.UUID.randomUUID().toString(), val name: String, val mimeType: String, val data: ByteArray)
 
 data class NativeAgentError(val kind: String, val title: String, val message: String, val retrying: Boolean) {
@@ -133,6 +146,7 @@ data class ThreadSnapshot(
     val rewindPoints: List<NativeRewindPoint>,
     val subagents: List<NativeSubagent>,
     val agentError: NativeAgentError? = null,
+    val entryMeta: List<NativeEntryMeta?> = emptyList(),
 ) { val isBusy: Boolean get() = status == "Generating" || currentTurnId != null }
 
 enum class EntryKind { USER, ASSISTANT, TOOL, PLAN, APPROVAL, CONTEXT, OTHER }

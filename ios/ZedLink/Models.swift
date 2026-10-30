@@ -148,6 +148,23 @@ struct NativeElicitation: Identifiable, Equatable {
     let fields: [NativeElicitationField]
 }
 
+struct NativeEntryMeta: Equatable {
+    let kind: String
+    let callID: String?
+    let elicitationID: String?
+
+    static func page(_ raw: Any?, count: Int) -> [NativeEntryMeta?] {
+        guard let rows = raw as? [[String: Any]], rows.count == count else {
+            return Array(repeating: nil, count: count)
+        }
+        return rows.map { row in
+            NativeEntryMeta(kind: row["kind"] as? String ?? "other",
+                            callID: row["call_id"] as? String,
+                            elicitationID: row["elicitation_id"] as? String)
+        }
+    }
+}
+
 struct NativeQueueEntry: Identifiable, Equatable {
     let id: Int
     let preview: String
@@ -291,6 +308,7 @@ struct ThreadSnapshot: Equatable {
     let rewindPoints: [NativeRewindPoint]
     let subagents: [NativeSubagent]
     var agentError: NativeAgentError? = nil
+    var entryMeta: [NativeEntryMeta?] = []
 
     var isBusy: Bool { status == "Generating" || currentTurnID != nil }
 }

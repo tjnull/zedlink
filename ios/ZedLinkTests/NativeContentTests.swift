@@ -39,6 +39,20 @@ final class SessionActivityTests: XCTestCase {
         library.observe([thread], profile: "a", target: "demo", selected: nil)
         XCTAssertTrue(library.updated.contains(key)); library.seen(key); XCTAssertTrue(library.updated.isEmpty)
     }
+
+    @MainActor func testRecentlyOpenedKeepsGatewayScopeAndPersistsOrder() {
+        let name = "zedlink.tests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let first = SessionLibrary.key(profile: "gateway-a", target: "project", thread: "same-thread")
+        let other = SessionLibrary.key(profile: "gateway-b", target: "project", thread: "same-thread")
+        let library = SessionLibrary(defaults: defaults)
+        library.opened(first)
+        library.opened(other)
+        library.opened(first)
+        XCTAssertEqual(library.recent, [first, other])
+        XCTAssertEqual(SessionLibrary(defaults: defaults).recent, [first, other])
+    }
 }
 
 final class InputFormTests: XCTestCase {
